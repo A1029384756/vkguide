@@ -1,5 +1,6 @@
 package vk_engine
 
+import "core:math"
 import "core:time"
 import vkb "odin-vk-bootstrap/vkb"
 import sdl "vendor:sdl2"
@@ -31,6 +32,9 @@ FRAME_OVERLAP :: 2
 FrameData :: struct {
 	command_pool:        vk.CommandPool,
 	main_command_buffer: vk.CommandBuffer,
+	swapchain_semaphore: vk.Semaphore,
+	render_semaphore:    vk.Semaphore,
+	render_fence:        vk.Fence,
 }
 
 VK_VALIDATE :: #config(VK_VALIDATE, true)
@@ -62,8 +66,11 @@ vk_engine_init :: proc(self: ^VulkanEngine) {
 vk_engine_cleanup :: proc(self: ^VulkanEngine) {
 	if self.initialized {
 		vk.DeviceWaitIdle(self.device.ptr)
-		for i in 0 ..< 2 {
+		for i in 0 ..< FRAME_OVERLAP {
 			vk.DestroyCommandPool(self.device.ptr, self.frames[i].command_pool, nil)
+			vk.DestroyFence(self.device.ptr, self.frames[i].render_fence, nil)
+			vk.DestroySemaphore(self.device.ptr, self.frames[i].render_semaphore, nil)
+			vk.DestroySemaphore(self.device.ptr, self.frames[i].swapchain_semaphore, nil)
 		}
 
 		sdl.DestroyWindow(self.window)
@@ -78,6 +85,87 @@ vk_engine_cleanup :: proc(self: ^VulkanEngine) {
 }
 
 vk_engine_draw :: proc(self: ^VulkanEngine) {
+	fence_wait_res := vk.WaitForFences(
+		self.device.ptr,
+		1,
+		&get_current_frame(self).render_fence,
+		true,
+		1000000000,
+	)
+	assert(fence_wait_res == .SUCCESS)
+
+	fence_reset_res := vk.ResetFences(self.device.ptr, 1, &get_current_frame(self).render_fence)
+	assert(fence_reset_res == .SUCCESS)
+
+	swapchain_image_idx: u32
+	next_image_res := vk.AcquireNextImageKHR(
+		self.device.ptr,
+		self.swapchain.ptr,
+		1000000000,
+		get_current_frame(self).swapchain_semaphore,
+		get_current_frame(self).render_fence,
+		&swapchain_image_idx,
+	)
+	assert(next_image_res == .SUCCESS)
+
+	cmd := get_current_frame(self).main_command_buffer
+	buf_reset_res := vk.ResetCommandBuffer(cmd, {.RELEASE_RESOURCES})
+	assert(buf_reset_res == .SUCCESS)
+
+	cmd_begin_info := command_buffer_begin_info({.ONE_TIME_SUBMIT})
+	buf_begin_res := vk.BeginCommandBuffer(cmd, &cmd_begin_info)
+	assert(buf_begin_res == .SUCCESS)
+
+	transition_image(cmd, self.swapchain_images[swapchain_image_idx], .UNDEFINED, .GENERAL)
+
+	flash := abs(math.sin_f32(f32(self.frame_number) / 120))
+	clear_value := vk.ClearColorValue {
+		float32 = {0, 0, flash, 1},
+	}
+
+	clear_range := image_subresource_range({.COLOR})
+	vk.CmdClearColorImage(
+		cmd,
+		self.swapchain_images[swapchain_image_idx],
+		.GENERAL,
+		&clear_value,
+		1,
+		&clear_range,
+	)
+
+	transition_image(cmd, self.swapchain_images[swapchain_image_idx], .GENERAL, .PRESENT_SRC_KHR)
+	buf_end_res := vk.EndCommandBuffer(cmd)
+	assert(buf_begin_res == .SUCCESS)
+
+	cmd_info := command_buffer_submit_info(cmd)
+	wait_info := sephamore_submit_info(
+		.COLOR_ATTACHMENT_OUTPUT,
+		get_current_frame(self).swapchain_semaphore,
+	)
+	signal_info := sephamore_submit_info(.ALL_GRAPHICS, get_current_frame(self).render_semaphore)
+
+	submit := submit_info(&cmd_info, &signal_info, &wait_info)
+	queue_submit_res := vk.QueueSubmit2(
+		self.graphics_queue,
+		1,
+		&submit,
+		get_current_frame(self).render_fence,
+	)
+	assert(queue_submit_res == .SUCCESS)
+
+	present_info := vk.PresentInfoKHR {
+		sType              = .PRESENT_INFO_KHR,
+		pSwapchains        = &self.swapchain.ptr,
+		swapchainCount     = 1,
+		pWaitSemaphores    = &get_current_frame(self).render_semaphore,
+		waitSemaphoreCount = 1,
+		pImageIndices      = &swapchain_image_idx,
+	}
+
+	queue_present_res := vk.QueuePresentKHR(self.graphics_queue, &present_info)
+	assert(queue_present_res == .SUCCESS)
+
+	self.frame_number += 1
 }
 
 vk_engine_run :: proc(self: ^VulkanEngine) {
@@ -203,6 +291,34 @@ vk_engine_init_commands :: proc(self: ^VulkanEngine) {
 
 @(private)
 vk_engine_init_sync_structures :: proc(self: ^VulkanEngine) {
+	fence_create_info := fence_create_info({.SIGNALED})
+	semaphore_create_info := semaphore_create_info({})
+
+	for i in 0 ..< FRAME_OVERLAP {
+		fence_create_res := vk.CreateFence(
+			self.device.ptr,
+			&fence_create_info,
+			nil,
+			&self.frames[i].render_fence,
+		)
+		assert(fence_create_res == .SUCCESS)
+
+		swapchain_semaphore_res := vk.CreateSemaphore(
+			self.device.ptr,
+			&semaphore_create_info,
+			nil,
+			&self.frames[i].swapchain_semaphore,
+		)
+		assert(swapchain_semaphore_res == .SUCCESS)
+
+		render_semaphore_res := vk.CreateSemaphore(
+			self.device.ptr,
+			&semaphore_create_info,
+			nil,
+			&self.frames[i].render_semaphore,
+		)
+		assert(render_semaphore_res == .SUCCESS)
+	}
 }
 
 @(private)
@@ -237,6 +353,6 @@ vk_engine_destroy_swapchain :: proc(self: ^VulkanEngine) {
 }
 
 @(private)
-vk_engine_get_current_frame :: proc(self: ^VulkanEngine) -> ^FrameData {
+get_current_frame :: proc(self: ^VulkanEngine) -> ^FrameData {
 	return &self.frames[self.frame_number % FRAME_OVERLAP]
 }

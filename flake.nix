@@ -16,7 +16,6 @@
           ols
           gcc12
           cmake
-          pkg-config
           vulkan-tools
           #put your env dependencies here
         ];

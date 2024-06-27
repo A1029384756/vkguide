@@ -1,0 +1,3 @@
+[submodule "vk_engine/odin-vma"]
+	path = vk_engine/odin-vma
+	url = https://github.com/DanielGavin/odin-vma

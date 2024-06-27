@@ -1,5 +1,6 @@
 package vk_engine
 
+import "core:container/queue"
 import "core:math"
 import "core:time"
 import vkb "odin-vk-bootstrap/vkb"
@@ -26,17 +27,11 @@ VulkanEngine :: struct {
 	frames:                [FRAME_OVERLAP]FrameData,
 	graphics_queue:        vk.Queue,
 	graphics_queue_family: u32,
+	// allocation info
+	main_deletion_queue:   DeletionQueue,
 }
 
 FRAME_OVERLAP :: 2
-FrameData :: struct {
-	command_pool:        vk.CommandPool,
-	main_command_buffer: vk.CommandBuffer,
-	swapchain_semaphore: vk.Semaphore,
-	render_semaphore:    vk.Semaphore,
-	render_fence:        vk.Fence,
-}
-
 VK_VALIDATE :: #config(VK_VALIDATE, true)
 loaded_engine: ^VulkanEngine
 
@@ -56,6 +51,10 @@ vk_engine_init :: proc(self: ^VulkanEngine) {
 
 	vk.load_proc_addresses(sdl.Vulkan_GetVkGetInstanceProcAddr())
 
+	for &frame in self.frames {
+		deletion_queue_init(&frame.deletion_queue)
+	}
+
 	vk_engine_init_vulkan(self)
 	vk_engine_init_swapchain(self)
 	vk_engine_init_commands(self)
@@ -66,15 +65,19 @@ vk_engine_init :: proc(self: ^VulkanEngine) {
 vk_engine_cleanup :: proc(self: ^VulkanEngine) {
 	if self.initialized {
 		vk.DeviceWaitIdle(self.device.ptr)
-		for i in 0 ..< FRAME_OVERLAP {
-			vk.DestroyCommandPool(self.device.ptr, self.frames[i].command_pool, nil)
-			vk.DestroyFence(self.device.ptr, self.frames[i].render_fence, nil)
-			vk.DestroySemaphore(self.device.ptr, self.frames[i].render_semaphore, nil)
-			vk.DestroySemaphore(self.device.ptr, self.frames[i].swapchain_semaphore, nil)
+		for &frame in self.frames {
+			vk.DestroyCommandPool(self.device.ptr, frame.command_pool, nil)
+			vk.DestroyFence(self.device.ptr, frame.render_fence, nil)
+			vk.DestroySemaphore(self.device.ptr, frame.render_semaphore, nil)
+			vk.DestroySemaphore(self.device.ptr, frame.swapchain_semaphore, nil)
+
+			deletion_queue_flush(&frame.deletion_queue)
 		}
 
 		sdl.DestroyWindow(self.window)
 	}
+
+	deletion_queue_flush(&self.main_deletion_queue)
 
 	vk_engine_destroy_swapchain(self)
 	vkb.destroy_device(self.device)
@@ -93,6 +96,8 @@ vk_engine_draw :: proc(self: ^VulkanEngine) {
 		1000000000,
 	)
 	assert(fence_wait_res == .SUCCESS)
+
+	deletion_queue_flush(&get_current_frame(self).deletion_queue)
 
 	fence_reset_res := vk.ResetFences(self.device.ptr, 1, &get_current_frame(self).render_fence)
 	assert(fence_reset_res == .SUCCESS)
@@ -270,20 +275,20 @@ vk_engine_init_commands :: proc(self: ^VulkanEngine) {
 		{.RESET_COMMAND_BUFFER},
 	)
 
-	for i in 0 ..< FRAME_OVERLAP {
+	for &frame in self.frames {
 		res_create_cmd_pool := vk.CreateCommandPool(
 			self.device.ptr,
 			&command_pool_info,
 			nil,
-			&self.frames[i].command_pool,
+			&frame.command_pool,
 		)
 		assert(res_create_cmd_pool == .SUCCESS)
 
-		cmd_alloc_info := command_buffer_allocate_info(self.frames[i].command_pool, 1)
+		cmd_alloc_info := command_buffer_allocate_info(frame.command_pool, 1)
 		res_alloc_cmd_buf := vk.AllocateCommandBuffers(
 			self.device.ptr,
 			&cmd_alloc_info,
-			&self.frames[i].main_command_buffer,
+			&frame.main_command_buffer,
 		)
 		assert(res_alloc_cmd_buf == .SUCCESS)
 	}
@@ -294,12 +299,12 @@ vk_engine_init_sync_structures :: proc(self: ^VulkanEngine) {
 	fence_create_info := fence_create_info({.SIGNALED})
 	semaphore_create_info := semaphore_create_info({})
 
-	for i in 0 ..< FRAME_OVERLAP {
+	for &frame in self.frames {
 		fence_create_res := vk.CreateFence(
 			self.device.ptr,
 			&fence_create_info,
 			nil,
-			&self.frames[i].render_fence,
+			&frame.render_fence,
 		)
 		assert(fence_create_res == .SUCCESS)
 
@@ -307,7 +312,7 @@ vk_engine_init_sync_structures :: proc(self: ^VulkanEngine) {
 			self.device.ptr,
 			&semaphore_create_info,
 			nil,
-			&self.frames[i].swapchain_semaphore,
+			&frame.swapchain_semaphore,
 		)
 		assert(swapchain_semaphore_res == .SUCCESS)
 
@@ -315,7 +320,7 @@ vk_engine_init_sync_structures :: proc(self: ^VulkanEngine) {
 			self.device.ptr,
 			&semaphore_create_info,
 			nil,
-			&self.frames[i].render_semaphore,
+			&frame.render_semaphore,
 		)
 		assert(render_semaphore_res == .SUCCESS)
 	}

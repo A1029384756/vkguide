@@ -4,6 +4,7 @@ import "core:container/queue"
 import "core:math"
 import "core:time"
 import vkb "odin-vk-bootstrap/vkb"
+import vma "odin-vma"
 import sdl "vendor:sdl2"
 import vk "vendor:vulkan"
 
@@ -29,6 +30,7 @@ VulkanEngine :: struct {
 	graphics_queue_family: u32,
 	// allocation info
 	main_deletion_queue:   DeletionQueue,
+	allocator:             vma.Allocator,
 }
 
 FRAME_OVERLAP :: 2
@@ -261,6 +263,14 @@ vk_engine_init_vulkan :: proc(self: ^VulkanEngine) {
 	graphics_queue_idx, get_queue_idx_err := vkb.device_get_queue_index(self.device, .Graphics)
 	assert(get_queue_idx_err == nil)
 	self.graphics_queue_family = graphics_queue_idx
+
+	allocator_info := vma.AllocatorCreateInfo {
+		physicalDevice = self.chosen_gpu.ptr,
+		device         = self.device.ptr,
+		instance       = self.instance.ptr,
+		flags          = {.BUFFER_DEVICE_ADDRESS},
+	}
+	vma.CreateAllocator(&allocator_info, &self.allocator)
 }
 
 @(private)

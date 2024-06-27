@@ -25,11 +25,26 @@
           vulkan-headers
           #put your runtime and build dependencies here
         ];
+
+        build_command = pkgs.writeShellApplication {
+          name = "build";
+          runtimeInputs = nativeBuildInputs ++ buildInputs;
+          text = ''
+            odin build . -extra-linker-flags:"-lstdc++ -lvulkan" -show-timings
+          '';
+        };
+        run_command = pkgs.writeShellApplication {
+          name = "run";
+          runtimeInputs = nativeBuildInputs ++ buildInputs;
+          text = ''
+            odin run . -extra-linker-flags:"-lstdc++ -lvulkan" -show-timings
+          '';
+        };
       in
       with pkgs;
       {
         devShells.default = mkShell {
-          packages = nativeBuildInputs ++ buildInputs;
+          packages = nativeBuildInputs ++ buildInputs ++ [ build_command run_command ];
           LD_LIBRARY_PATH = "${lib.makeLibraryPath buildInputs}";
         };
       }

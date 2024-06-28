@@ -17,6 +17,7 @@
           gcc12
           cmake
           vulkan-tools
+          glslls
           #put your env dependencies here
         ];
         buildInputs = with pkgs; [

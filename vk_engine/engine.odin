@@ -1,6 +1,7 @@
 package vk_engine
 
 import "core:container/queue"
+import "core:fmt"
 import "core:math"
 import "core:time"
 import vkb "odin-vk-bootstrap/vkb"
@@ -31,6 +32,9 @@ VulkanEngine :: struct {
 	// allocation info
 	main_deletion_queue:   DeletionQueue,
 	allocator:             vma.Allocator,
+	// draw resources
+	draw_image:            AllocatedImage,
+	draw_extent:           vk.Extent2D,
 }
 
 FRAME_OVERLAP :: 2
@@ -119,28 +123,39 @@ vk_engine_draw :: proc(self: ^VulkanEngine) {
 	buf_reset_res := vk.ResetCommandBuffer(cmd, {.RELEASE_RESOURCES})
 	assert(buf_reset_res == .SUCCESS)
 
+	self.draw_extent.height = self.draw_image.image_extent.height
+	self.draw_extent.width = self.draw_image.image_extent.width
+
 	cmd_begin_info := command_buffer_begin_info({.ONE_TIME_SUBMIT})
 	buf_begin_res := vk.BeginCommandBuffer(cmd, &cmd_begin_info)
 	assert(buf_begin_res == .SUCCESS)
 
-	transition_image(cmd, self.swapchain_images[swapchain_image_idx], .UNDEFINED, .GENERAL)
+	transition_image(cmd, self.draw_image.image, .UNDEFINED, .GENERAL)
 
-	flash := abs(math.sin_f32(f32(self.frame_number) / 120))
-	clear_value := vk.ClearColorValue {
-		float32 = {0, 0, flash, 1},
-	}
+	draw_background(self, cmd)
 
-	clear_range := image_subresource_range({.COLOR})
-	vk.CmdClearColorImage(
+	transition_image(cmd, self.draw_image.image, .GENERAL, .PRESENT_SRC_KHR)
+	transition_image(
 		cmd,
 		self.swapchain_images[swapchain_image_idx],
-		.GENERAL,
-		&clear_value,
-		1,
-		&clear_range,
+		.UNDEFINED,
+		.TRANSFER_DST_OPTIMAL,
 	)
 
-	transition_image(cmd, self.swapchain_images[swapchain_image_idx], .GENERAL, .PRESENT_SRC_KHR)
+	copy_image_to_image(
+		cmd,
+		self.draw_image.image,
+		self.swapchain_images[swapchain_image_idx],
+		self.draw_extent,
+		self.swapchain.extent,
+	)
+	transition_image(
+		cmd,
+		self.swapchain_images[swapchain_image_idx],
+		.TRANSFER_DST_OPTIMAL,
+		.PRESENT_SRC_KHR,
+	)
+
 	buf_end_res := vk.EndCommandBuffer(cmd)
 	assert(buf_begin_res == .SUCCESS)
 
@@ -270,12 +285,70 @@ vk_engine_init_vulkan :: proc(self: ^VulkanEngine) {
 		instance       = self.instance.ptr,
 		flags          = {.BUFFER_DEVICE_ADDRESS},
 	}
-	vma.CreateAllocator(&allocator_info, &self.allocator)
+	allocator_create_res := vma.CreateAllocator(&allocator_info, &self.allocator)
+	assert(allocator_create_res == .SUCCESS)
+
+	deletion_item := DeletionQueueEntry {
+		func = proc(data: rawptr) {
+			vma.DestroyAllocator(cast(vma.Allocator)data)
+		},
+		data = self.allocator,
+	}
+
+	deletion_queue_push(&self.main_deletion_queue, deletion_item)
 }
 
 @(private)
 vk_engine_init_swapchain :: proc(self: ^VulkanEngine) {
 	vk_engine_create_swapchain(self, self.window_extent.width, self.window_extent.height)
+
+	draw_image_extent := vk.Extent3D{self.window_extent.width, self.window_extent.height, 1}
+	self.draw_image.image_format = .R16G16B16A16_SFLOAT
+	self.draw_image.image_extent = draw_image_extent
+
+	rimg_info := image_create_info(
+		self.draw_image.image_format,
+		{.TRANSFER_SRC, .TRANSFER_DST, .STORAGE, .COLOR_ATTACHMENT},
+		draw_image_extent,
+	)
+	rimg_allocinfo := vma.AllocationCreateInfo {
+		usage         = .GPU_ONLY,
+		requiredFlags = {.DEVICE_LOCAL},
+	}
+
+	create_img_res := vma.CreateImage(
+		self.allocator,
+		&rimg_info,
+		&rimg_allocinfo,
+		&self.draw_image.image,
+		&self.draw_image.allocation,
+		nil,
+	)
+	assert(create_img_res == .SUCCESS)
+
+	rview_info := imageview_create_info(
+		self.draw_image.image_format,
+		self.draw_image.image,
+		{.COLOR},
+	)
+
+	create_img_view_res := vk.CreateImageView(
+		self.device.ptr,
+		&rview_info,
+		nil,
+		&self.draw_image.image_view,
+	)
+	assert(create_img_res == .SUCCESS)
+
+	image_deletion := DeletionQueueEntry {
+		func = proc(data: rawptr) {
+			self := cast(^VulkanEngine)data
+			vk.DestroyImageView(self.device.ptr, self.draw_image.image_view, nil)
+			vma.DestroyImage(self.allocator, self.draw_image.image, self.draw_image.allocation)
+		},
+		data = self,
+	}
+	deletion_queue_push(&self.main_deletion_queue, image_deletion)
 }
 
 @(private)
@@ -370,4 +443,15 @@ vk_engine_destroy_swapchain :: proc(self: ^VulkanEngine) {
 @(private)
 get_current_frame :: proc(self: ^VulkanEngine) -> ^FrameData {
 	return &self.frames[self.frame_number % FRAME_OVERLAP]
+}
+
+@(private)
+draw_background :: proc(self: ^VulkanEngine, cmd: vk.CommandBuffer) {
+	flash := abs(math.sin_f32(f32(self.frame_number) / 120))
+	clear_value := vk.ClearColorValue {
+		float32 = {0, 0, flash, 1},
+	}
+
+	clear_range := image_subresource_range({.COLOR})
+	vk.CmdClearColorImage(cmd, self.draw_image.image, .GENERAL, &clear_value, 1, &clear_range)
 }

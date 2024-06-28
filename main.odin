@@ -10,7 +10,9 @@ main :: proc() {
 		defer log.destroy_console_logger(context.logger)
 	}
 
-	engine: e.VulkanEngine
+	engine := e.VulkanEngine {
+		window_extent = {1700, 900},
+	}
 	e.vk_engine_init(&engine)
 	e.vk_engine_run(&engine)
 	e.vk_engine_cleanup(&engine)
